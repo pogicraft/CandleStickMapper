@@ -459,73 +459,24 @@ class Seglines(QGraphicsItemGroup):
 		self.addToGroup(self.text)
 
 
-class SampleBox(QGraphicsItemGroup):
-	def __init__(self, boundaries, v_max, v_min, parent=None):
-		super().__init__(parent)
-		
-		self.walls = QGraphicsRectItem(boundaries.x(), boundaries.y(), boundaries.width(), boundaries.height())
-		self.top_value = v_max
-		self.bottom_value = v_min
-		self.left_value = 0
-		self.right_value = 100
-		self.range = self.top_value - self.bottom_value
-		self.hor_range = self.right_value - self.left_value
-		self.setFlag(QGraphicsItem.ItemIsMovable, True)
-		self.text = QGraphicsTextItem('Filler things text')
-		self.box = QGraphicsRectItem(self.text.boundingRect())
-		self.box.setPen(pen_h2())
-		self.addToGroup(self.text)
-		self.addToGroup(self.box)
-		self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
-	
-	def itemChange(self, change, value):
-		if change == QGraphicsItem.ItemPositionChange:
-			y = format_dollar(self.top_value - (value.y() * (self.range / self.walls.boundingRect().height())))
-			right_wall = self.walls.sceneBoundingRect().right() - self.box.boundingRect().width()
-			bottom_wall = self.walls.sceneBoundingRect().bottom() - self.box.boundingRect().height()
-			if value.x() > self.walls.x() and value.y() > self.walls.y():
-				if value.x() < right_wall and value.y() < bottom_wall:
-					self.text.setPlainText(f"{format_dollar(value.x() * (self.hor_range / self.walls.boundingRect().width()))}, {y}")
-				else:
-					self.text.setPlainText(f"{format_dollar(value.x() * (self.hor_range / self.walls.boundingRect().width()))}, {y}")
-					return super().itemChange(change, QPointF(0, 0))
-			elif value.x() > self.walls.x():
-				if value.x() < right_wall:
-					self.text.setPlainText(f"{format_dollar(value.x())}, {format_dollar(self.top_value)}")
-					return super().itemChange(change, QPointF(value.x(), 0))
-				else:
-					self.text.setPlainText(f"{format_dollar(right_wall)}, {format_dollar(self.top_value)}")
-					return super().itemChange(change, QPointF(right_wall, 0))
-			elif value.y() > self.walls.y():
-				if value.y() < bottom_wall:
-					self.text.setPlainText(f"{format_dollar(self.left_value)}, {y}")
-					return super().itemChange(change, QPointF(0, value.y()))
-				else:
-					self.text.setPlainText(f"{format_dollar(self.left_value)}, {y}")
-					return super().itemChange(change, QPointF(0, bottom_wall))
-			else:
-				self.text.setPlainText(f"{format_dollar(self.left_value)}, {format_dollar(self.top_value)}")
-				return super().itemChange(change, QPointF(0, 0))
-		return super().itemChange(change, value)
-
-
-q = QApplication()
-w = QMainWindow()
-c = QGraphicsView()
-s = QGraphicsScene()
-c.setScene(s)
-w.setCentralWidget(c)
-f = CandlestickGroup()
-frame = pd.read_csv('SPY.csv').sample(n=15)
-high = max(frame.loc[:, 'High'].values.tolist())
-low = min(frame.loc[:, 'Low'].values.tolist())
-for row, value in frame.iterrows():
-	f.add_candle(value["Open"], value["High"], value["Low"], value["Close"],
+if __name__ == "__main__":
+	q = QApplication()
+	w = QMainWindow()
+	c = QGraphicsView()
+	s = QGraphicsScene()
+	c.setScene(s)
+	w.setCentralWidget(c)
+	f = CandlestickGroup()
+	frame = pd.read_csv('SPY.csv').sample(n=15)
+	high = max(frame.loc[:, 'High'].values.tolist())
+	low = min(frame.loc[:, 'Low'].values.tolist())
+	for row, value in frame.iterrows():
+		f.add_candle(value["Open"], value["High"], value["Low"], value["Close"],
 				 int(time.mktime(datetime.strptime(value["Date"], "%Y-%m-%d").timetuple())))
-# [ic(each.high, each.low, each.open, each.close) for each in f.candles]
-ic(high, low)
-s.addItem(f)
-f.create_seglines()
-s.setSceneRect(s.itemsBoundingRect())
-w.show()
-q.exec()
+	# [ic(each.high, each.low, each.open, each.close) for each in f.candles]
+	ic(high, low)
+	s.addItem(f)
+	f.create_seglines()
+	s.setSceneRect(s.itemsBoundingRect())
+	w.show()
+	q.exec()
