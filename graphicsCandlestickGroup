@@ -1,0 +1,531 @@
+import pandas as pd
+
+from main import *
+import time
+
+
+def pen_h1():
+	p = QPen()
+	p.setWidth(5)
+	return p
+
+
+def pen_h2():
+	p = QPen()
+	p.setWidth(2)
+	return p
+
+
+def pen_highlight():
+	p = QPen()
+	p.setWidth(5)
+	p.setColor(Qt.yellow)
+	return p
+
+
+def format_dollar(string):
+	return "${:.2f}".format(string)
+
+
+class ResizableRect(QGraphicsRectItem):
+	def __init__(self, *args):
+		super().__init__(*args)
+		self.setFlag(QGraphicsItem.ItemIsMovable, True)
+		self.setPen(QPen(QBrush(QColor('blue')), 5))
+		self.selected_edge = None
+		self.click_pos = self.click_rect = None
+	
+	def mousePressEvent(self, event):
+		""" The mouse is pressed, start tracking movement. """
+		self.click_pos = event.pos()
+		rect = self.rect()
+		if abs(rect.left() - self.click_pos.x()) < 5:
+			self.selected_edge = 'left'
+		elif abs(rect.right() - self.click_pos.x()) < 5:
+			self.selected_edge = 'right'
+		elif abs(rect.top() - self.click_pos.y()) < 5:
+			self.selected_edge = 'top'
+		elif abs(rect.bottom() - self.click_pos.y()) < 5:
+			self.selected_edge = 'bottom'
+		else:
+			self.selected_edge = None
+		self.click_pos = event.pos()
+		self.click_rect = rect
+		super().mousePressEvent(event)
+	
+	def mouseMoveEvent(self, event):
+		""" Continue tracking movement while the mouse is pressed. """
+		# Calculate how much the mouse has moved since the click.
+		pos = event.pos()
+		x_diff = pos.x() - self.click_pos.x()
+		y_diff = pos.y() - self.click_pos.y()
+		
+		# Start with the rectangle as it was when clicked.
+		rect = QRectF(self.click_rect)
+		
+		# Then adjust by the distance the mouse moved.
+		if self.selected_edge is None:
+			rect.translate(x_diff, y_diff)
+		elif self.selected_edge == 'top':
+			rect.adjust(0, y_diff, 0, 0)
+		elif self.selected_edge == 'left':
+			rect.adjust(x_diff, 0, 0, 0)
+		elif self.selected_edge == 'bottom':
+			rect.adjust(0, 0, 0, y_diff)
+		elif self.selected_edge == 'right':
+			rect.adjust(0, 0, x_diff, 0)
+		
+		# Figure out the limits of movement. I did it by updating the scene's
+		# rect after the window resizes.
+		scene_rect = self.scene().sceneRect()
+		view_left = scene_rect.left()
+		view_top = scene_rect.top()
+		view_right = scene_rect.right()
+		view_bottom = scene_rect.bottom()
+		
+		# Next, check if the rectangle has been dragged out of bounds.
+		if rect.top() < view_top:
+			if self.selected_edge is None:
+				rect.translate(0, view_top - rect.top())
+			else:
+				rect.setTop(view_top)
+		if rect.left() < view_left:
+			if self.selected_edge is None:
+				rect.translate(view_left - rect.left(), 0)
+			else:
+				rect.setLeft(view_left)
+		if view_bottom < rect.bottom():
+			if self.selected_edge is None:
+				rect.translate(0, view_bottom - rect.bottom())
+			else:
+				rect.setBottom(view_bottom)
+		if view_right < rect.right():
+			if self.selected_edge is None:
+				rect.translate(view_right - rect.right(), 0)
+			else:
+				rect.setRight(view_right)
+		
+		# Also check if the rectangle has been dragged inside out.
+		if rect.width() < 5:
+			if self.selected_edge == 'left':
+				rect.setLeft(rect.right() - 5)
+			else:
+				rect.setRight(rect.left() + 5)
+		if rect.height() < 5:
+			if self.selected_edge == 'top':
+				rect.setTop(rect.bottom() - 5)
+			else:
+				rect.setBottom(rect.top() + 5)
+		
+		# Finally, update the rect that is now guaranteed to stay in bounds.
+		self.setRect(rect)
+
+
+class MainWindow(QMainWindow):
+	def __init__(self):
+		super().__init__()
+		central = QWidget(self)
+		self.setCentralWidget(central)
+		
+		self.rect = ResizableRect()
+		scene = QGraphicsScene(0, 0, 300, 300)
+		scene.addItem(self.rect)
+		self.view = QGraphicsView(central)
+		self.view.setScene(scene)
+		
+		layout = QVBoxLayout(central)
+		self.setLayout(layout)
+		layout.addWidget(self.view)
+		
+		self.old_size = None
+	
+	def show(self):
+		super().show()
+		self.resize_scene()
+	
+	def resizeEvent(self, event: QResizeEvent):
+		super().resizeEvent(event)
+		self.resize_scene()
+	
+	def resize_scene(self):
+		if not self.isVisible():
+			# Viewport size isn't set yet, so calculation won't work.
+			return
+		size = self.view.maximumViewportSize()
+		if self.old_size is None:
+			new_rect = QRectF(size.width() / 4, size.height() / 4,
+							  size.width() / 2, size.height() / 2)
+		else:
+			old_rect = QRectF(self.rect.rect())
+			x_scale = size.width() / self.old_size.width()
+			y_scale = size.height() / self.old_size.height()
+			new_rect = QRectF(old_rect.left() * x_scale, old_rect.top() * y_scale,
+							  old_rect.width() * x_scale, old_rect.height() * y_scale)
+		self.rect.setRect(new_rect)
+		self.view.scene().setSceneRect(0, 0, size.width(), size.height())
+		self.old_size = size
+
+
+class CandlestickGroup(QGraphicsItemGroup):
+	def __init__(self, max_size=QSizeF(600, 400), candles=None, candle_width=14, parent=None):
+		super().__init__(parent)
+		
+		self.setHandlesChildEvents(False)
+		self.setAcceptHoverEvents(True)
+		self.inter_candle_spacing = 10
+		self.pre_candle_spacing = 20
+		self.box_padding = 0  # this not being zero breaks the code
+		self.padding_percent = 30
+		self.candle_width = candle_width
+		self.ob_box = QGraphicsRectItem(0, 0, max_size.width(), max_size.height())
+		self.ob_box.setPen(pen_h1())
+		self.candle_box = QGraphicsRectItem(0, 0, max_size.width() * ((100 - self.box_padding) / 100),
+											max_size.height() * ((100 - self.box_padding) / 100))
+		self.candle_box.moveBy(max_size.width() * self.box_padding / 100 / 2, max_size.height() * self.box_padding / 100 / 2)
+		self.data_box = DataBox()
+		self.data_box.setZValue(100)
+		self.data_box.hide()
+		self.candles = []
+		self.seglines = []
+		if self.candles:
+			if isinstance(self.candles, list):
+				for each in self.candles:
+					self.add_candle(*each)
+		self.addToGroup(self.ob_box)
+		self.addToGroup(self.candle_box)
+		self.addToGroup(self.data_box)
+		self.data_box.setPos(self.candle_box.boundingRect().right() - self.data_box.boundingRect().width(), self.candle_box.y())
+		self.high = 0
+		self.low = 0
+		self.unreachable_price = 0
+		self.active_selection = None
+		self.previous_selection = None
+		self.passive_selection = None
+		self.hold_selection = False
+		self.highlighter = QGraphicsPathItem()
+		self.highlighter.setPen(pen_highlight())
+		self.addToGroup(self.highlighter)
+		self.highlighter.hide()
+	
+	def update_candles(self):
+		for n, each in enumerate(self.candles):
+			each.setX(n * (self.candle_width + self.inter_candle_spacing) + self.candle_box.x() + self.pre_candle_spacing)
+			each.ferment(self.high + self.unreachable_price, self.low - self.unreachable_price, self.candle_box.boundingRect().bottom(),
+						 self.candle_box.boundingRect().top())
+	
+	def add_candle(self, v_open, v_high, v_low, v_close, v_time=0):
+		if v_high >= self.high:
+			self.high = v_high
+		if self.low == 0:
+			self.low = self.high
+		if v_low <= self.low:
+			self.low = v_low
+		priced_range = self.high - self.low
+		self.unreachable_price = priced_range * self.padding_percent / 100
+		item = CandleItem(v_open, v_high, v_low, v_close, self.candle_width, v_time)
+		item.setAcceptHoverEvents(True)
+		item.hover.enter.connect(self.hover_candle)
+		item.hover.leave.connect(self.leave_candle)
+		if v_time > 0:
+			group_a = []
+			group_b = []
+			for a in self.candles:
+				if a.timestamp <= v_time:
+					group_a.append(a)
+			group_a.append(item)
+			for b in self.candles:
+				if b.timestamp > v_time:
+					group_b.append(b)
+			self.candles = group_a + group_b
+		else:
+			self.candles.append(item)
+		self.addToGroup(item)
+		self.update_candles()
+	
+	def toggle_seglines(self):
+		if isinstance(self.seglines, list) and len(self.seglines) > 0:
+			for each in self.seglines:
+				if each.isVisible():
+					each.hide()
+				else:
+					each.show()
+		else:
+			return False
+	
+	def create_seglines(self, number_lines=4):
+		lines_index = number_lines + 1
+		priced_range = self.high - self.low + (self.unreachable_price * 2)
+		price_step = priced_range / lines_index
+		step = self.candle_box.boundingRect().height() / lines_index
+		self.seglines.append(Seglines(self.candle_box.boundingRect().width() - 1, self.low - self.unreachable_price, invisible_line=True))
+		self.seglines[-1].setY(self.candle_box.sceneBoundingRect().bottom())
+		for n in range(number_lines):
+			iteration = n + 1
+			location = step * iteration
+			price_at = priced_range / lines_index * iteration
+			l = Seglines(self.candle_box.boundingRect().width() - 1, self.low - self.unreachable_price + price_at)
+			l.setY(self.candle_box.sceneBoundingRect().bottom() - location)
+			l.moveBy(self.candle_box.sceneBoundingRect().left(), 0)
+			self.seglines.append(l)
+		self.seglines.append(Seglines(self.candle_box.boundingRect().width() - 1, self.high + self.unreachable_price, invisible_line=True))
+		self.seglines[-1].setY(self.candle_box.sceneBoundingRect().top())
+		for each in self.seglines:
+			each.setZValue(-100)
+			each.setX(self.candle_box.sceneBoundingRect().left())
+			self.addToGroup(each)
+		self.ob_box.setRect(self.scene().itemsBoundingRect())
+	
+	def create_vert_lines(self, by_segment=5, by_timestamp=0, by_day=0, by_candle_count=0):
+		if by_timestamp == 0 and by_day == 0 and by_candle_count == 0:
+			pixel_length = self.candle_box.boundingRect().width() / (by_segment + 1)
+	
+	def insert_metadata(self, candle_index, dict_key, set_value):
+		self.candles[candle_index].metadata[dict_key] = set_value
+	
+	def candle_count(self):
+		return len(self.candles)
+	
+	def hoverEnterEvent(self, event):
+		super().hoverEnterEvent(event)
+	
+	def mousePressEvent(self, event):
+		if self.active_selection:
+			if self.hold_selection:
+				self.hold_selection = False
+				if self.passive_selection:
+					self.hover_candle(self.passive_selection)
+					self.passive_selection = None
+					self.hold_selection = True
+				else:
+					self.leave_candle(None)
+			else:
+				self.hold_selection = True
+		super().mousePressEvent(event)
+	
+	def hover_candle(self, target):
+		if not self.hold_selection:
+			self.active_selection = target
+			self.highlighter.setPath(self.mapFromItem(target, target.highlighter_path()))
+			self.highlighter.show()
+			self.data_box.show()
+			self.data_box.update_box(target.open, target.high, target.low, target.close)
+		else:
+			self.passive_selection = target
+	
+	def leave_candle(self, target):
+		if not self.hold_selection:
+			self.active_selection = None
+			self.previous_selection = target
+			self.highlighter.hide()
+			self.data_box.hide()
+		else:
+			self.passive_selection = None
+
+
+class HoverClass(QObject):
+	enter = Signal(object)
+	leave = Signal(object)
+
+
+class DataBox(QGraphicsItemGroup):
+	def __init__(self, parent=None):
+		super().__init__(parent)
+		
+		self.box = QGraphicsRectItem()
+		self.white_brush = QBrush(Qt.white)
+		self.box.setBrush(self.white_brush)
+		self.setFlag(QGraphicsItem.ItemIsMovable, True)
+		self.high = QGraphicsTextItem('High: $0.00')
+		self.low = QGraphicsTextItem('Low: $0.00')
+		self.open = QGraphicsTextItem('Open: $0.00')
+		self.close = QGraphicsTextItem('Close: $0.00')
+		self.texts = [self.open, self.high, self.low, self.close]
+		self.the_width = max([a.boundingRect().width() for a in self.texts])
+		self.padding_pixels = 5
+		for n, each in enumerate(self.texts):
+			each.setY(n * each.boundingRect().height() + self.padding_pixels)
+		self.addToGroup(self.box)
+		self.addToGroup(self.high)
+		self.addToGroup(self.low)
+		self.addToGroup(self.open)
+		self.addToGroup(self.close)
+		self.box.setRect(self.boundingRect().adjusted(-self.padding_pixels, -self.padding_pixels, self.padding_pixels * 2, self.padding_pixels * 2))
+		self.box.setPen(pen_h2())
+	
+	def update_box(self, v_open, v_high, v_low, v_close):
+		self.high.setPlainText('High: ' + format_dollar(v_high))
+		self.close.setPlainText('Close: ' + format_dollar(v_close))
+		self.open.setPlainText('Open: ' + format_dollar(v_open))
+		self.low.setPlainText('Low: ' + format_dollar(v_low))
+		p = self.box.pen()
+		if v_open > v_close:
+			p.setColor(Qt.darkRed)
+			self.box.setPen(p)
+		else:
+			p.setColor(Qt.darkGreen)
+			self.box.setPen(p)
+		self.recalc_width()
+	
+	def recalc_width(self):
+		width_change = max([a.boundingRect().width() for a in self.texts]) - self.the_width
+		if width_change != 0:
+			self.box.setRect(self.box.boundingRect().adjusted(0, 0, width_change, 0))
+			self.the_width += width_change
+
+
+class CandleItem(QGraphicsItemGroup):
+	def __init__(self, v_open, v_high, v_low, v_close, width=12, timestamp=0, parent=None):
+		super().__init__(parent)
+		
+		self.setAcceptHoverEvents(True)
+		self.setHandlesChildEvents(False)
+		self.open = v_open
+		self.high = v_high
+		self.low = v_low
+		self.close = v_close
+		self.body_width = width
+		self.wick_range = self.high - self.low
+		self.body_range = self.open - self.close
+		self.timestamp = timestamp
+		self.body = QGraphicsRectItem()
+		self.wick = QGraphicsLineItem()
+		self.body.setZValue(20)
+		self.wick.setZValue(-20)
+		self.body.setBrush(self.body_brush())
+		self.addToGroup(self.body)
+		self.addToGroup(self.wick)
+		self.body.setAcceptHoverEvents(True)
+		self.wick.setAcceptHoverEvents(True)
+		self.metadata = dict()
+		self.edit_lines_group = QGraphicsItemGroup()
+		self.data_values_group = QGraphicsItemGroup()
+		self.hold_lines = False
+		self.hold_values = False
+		self.hover = HoverClass()
+		self.setup_meta_groups()
+	
+	def ferment(self, dollar_max, dollar_min, pixel_bottom, pixel_top):
+		ratio = (pixel_bottom - pixel_top) / (dollar_max - dollar_min)
+		self.wick.setLine(self.body_width / 2, 0, self.body_width / 2, ratio * (self.high - self.low))
+		self.wick.setY(self.boundingRect().top() + ratio * (dollar_max - self.high))
+		if self.open < self.close:
+			self.body.setRect(QRectF(0, self.wick.y() + ratio * (self.high - self.close), self.body_width, ratio * (self.close - self.open)))
+		else:
+			self.body.setRect(QRectF(0, self.wick.y() + ratio * (self.high - self.open), self.body_width, ratio * (self.open - self.close)))
+	
+	def body_brush(self):
+		if self.open < self.close:
+			return QBrush(Qt.green)
+		else:
+			return QBrush(Qt.red)
+	
+	def setup_meta_groups(self):
+		self.addToGroup(self.edit_lines_group)
+		self.addToGroup(self.data_values_group)
+	
+	def highlighter_path(self):
+		path = QPainterPath()
+		path.moveTo(self.body_width / 2, self.wick.sceneBoundingRect().top())
+		path.lineTo(self.body_width / 2, self.wick.sceneBoundingRect().bottom())
+		path.addRect(self.body.boundingRect())
+		return path
+	
+	def hoverEnterEvent(self, event):
+		self.hover.enter.emit(self)
+		super().hoverEnterEvent(event)
+	
+	def hoverLeaveEvent(self, event):
+		self.hover.leave.emit(self)
+		super().hoverLeaveEvent(event)
+
+
+class Seglines(QGraphicsItemGroup):
+	def __init__(self, width, label=0.00, label_location='right', font=QFont('Arial', 12), invisible_line=False, parent=None):
+		super().__init__(parent)
+		
+		self.line = QGraphicsLineItem(0, 0, width, 0)
+		self.text = QGraphicsTextItem(format_dollar(label))
+		self.text.setFont(font)
+		p = QPen()
+		p.setWidth(2)
+		p.setColor(Qt.gray)
+		p.setStyle(Qt.DashDotDotLine)
+		self.line.setPen(p)
+		x_offset = Munch(right=width + self.text.boundingRect().width() / 4)
+		y_offset = Munch(right=0 - self.text.boundingRect().height() / 2)
+		self.text.setPos(x_offset[label_location], y_offset[label_location])
+		if not invisible_line:
+			self.addToGroup(self.line)
+		self.addToGroup(self.text)
+
+
+class SampleBox(QGraphicsItemGroup):
+	def __init__(self, boundaries, v_max, v_min, parent=None):
+		super().__init__(parent)
+		
+		self.walls = QGraphicsRectItem(boundaries.x(), boundaries.y(), boundaries.width(), boundaries.height())
+		self.top_value = v_max
+		self.bottom_value = v_min
+		self.left_value = 0
+		self.right_value = 100
+		self.range = self.top_value - self.bottom_value
+		self.hor_range = self.right_value - self.left_value
+		self.setFlag(QGraphicsItem.ItemIsMovable, True)
+		self.text = QGraphicsTextItem('Filler things text')
+		self.box = QGraphicsRectItem(self.text.boundingRect())
+		self.box.setPen(pen_h2())
+		self.addToGroup(self.text)
+		self.addToGroup(self.box)
+		self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+	
+	def itemChange(self, change, value):
+		if change == QGraphicsItem.ItemPositionChange:
+			y = format_dollar(self.top_value - (value.y() * (self.range / self.walls.boundingRect().height())))
+			right_wall = self.walls.sceneBoundingRect().right() - self.box.boundingRect().width()
+			bottom_wall = self.walls.sceneBoundingRect().bottom() - self.box.boundingRect().height()
+			if value.x() > self.walls.x() and value.y() > self.walls.y():
+				if value.x() < right_wall and value.y() < bottom_wall:
+					self.text.setPlainText(f"{format_dollar(value.x() * (self.hor_range / self.walls.boundingRect().width()))}, {y}")
+				else:
+					self.text.setPlainText(f"{format_dollar(value.x() * (self.hor_range / self.walls.boundingRect().width()))}, {y}")
+					return super().itemChange(change, QPointF(0, 0))
+			elif value.x() > self.walls.x():
+				if value.x() < right_wall:
+					self.text.setPlainText(f"{format_dollar(value.x())}, {format_dollar(self.top_value)}")
+					return super().itemChange(change, QPointF(value.x(), 0))
+				else:
+					self.text.setPlainText(f"{format_dollar(right_wall)}, {format_dollar(self.top_value)}")
+					return super().itemChange(change, QPointF(right_wall, 0))
+			elif value.y() > self.walls.y():
+				if value.y() < bottom_wall:
+					self.text.setPlainText(f"{format_dollar(self.left_value)}, {y}")
+					return super().itemChange(change, QPointF(0, value.y()))
+				else:
+					self.text.setPlainText(f"{format_dollar(self.left_value)}, {y}")
+					return super().itemChange(change, QPointF(0, bottom_wall))
+			else:
+				self.text.setPlainText(f"{format_dollar(self.left_value)}, {format_dollar(self.top_value)}")
+				return super().itemChange(change, QPointF(0, 0))
+		return super().itemChange(change, value)
+
+
+q = QApplication()
+w = QMainWindow()
+c = QGraphicsView()
+s = QGraphicsScene()
+c.setScene(s)
+w.setCentralWidget(c)
+f = CandlestickGroup()
+frame = pd.read_csv('SPY.csv').sample(n=15)
+high = max(frame.loc[:, 'High'].values.tolist())
+low = min(frame.loc[:, 'Low'].values.tolist())
+for row, value in frame.iterrows():
+	f.add_candle(value["Open"], value["High"], value["Low"], value["Close"],
+				 int(time.mktime(datetime.strptime(value["Date"], "%Y-%m-%d").timetuple())))
+# [ic(each.high, each.low, each.open, each.close) for each in f.candles]
+ic(high, low)
+s.addItem(f)
+f.create_seglines()
+s.setSceneRect(s.itemsBoundingRect())
+w.show()
+q.exec()
